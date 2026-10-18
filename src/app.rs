@@ -42,6 +42,10 @@ pub struct App {
     capturing: Option<(usize, Option<u16>)>,
     /// Quick-assign state: target output axis + input baseline snapshot.
     assigning: Option<(OutAxis, [f32; 6], std::time::Instant)>,
+    /// Which axis layer the Axes editor is showing.
+    edit_shift: bool,
+    /// Baseline key state while capturing the shift button.
+    capturing_shift: Option<Option<u16>>,
     /// Result of asking the freedesktop appearance portal for color-scheme.
     /// None = couldn't detect; Some(true) = dark; Some(false) = light/none.
     system_dark: Option<bool>,
@@ -95,6 +99,8 @@ impl App {
             status: "idle".into(),
             capturing: None,
             assigning: None,
+            edit_shift: false,
+            capturing_shift: None,
             system_dark: detect_system_dark(),
         };
         if app.devices.is_empty() {
@@ -269,9 +275,23 @@ fn trigger_bar(ui: &mut egui::Ui, v: f32) {
     );
 }
 
-fn gamepad_view(ui: &mut egui::Ui, out: &[f32; 6], pressed: &HashSet<u16>) {
+fn gamepad_view(
+    ui: &mut egui::Ui,
+    out: &[f32; 6],
+    pressed: &HashSet<u16>,
+    shifted: bool,
+) {
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new("Virtual gamepad").strong());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Virtual gamepad").strong());
+            if shifted {
+                ui.label(
+                    egui::RichText::new("SHIFT")
+                        .color(egui::Color32::WHITE)
+                        .background_color(egui::Color32::from_rgb(180, 70, 40)),
+                );
+            }
+        });
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.label("LT");
@@ -428,6 +448,16 @@ impl eframe::App for App {
         let (out, out_pressed) = self.out_preview.lock().unwrap().clone();
         let pressed_set: HashSet<u16> = out_pressed.into_iter().collect();
 
+        // Shift-key capture.
+        if let Some(baseline) = self.capturing_shift {
+            if state.last_key.is_some() && state.last_key != baseline {
+                let key = state.last_key.unwrap();
+                self.profile.write().unwrap().shift_src = Some(key);
+                self.status = format!("shift key = 0x{key:03X}");
+                self.capturing_shift = None;
+            }
+        }
+
         // Quick-assign: after arming an output axis, the first input DOF that
         // moves past the threshold gets bound to it.
         if let Some((dest, base, since)) = self.assigning {
@@ -450,11 +480,12 @@ impl eframe::App for App {
                 }
                 if let Some(i) = best {
                     let mut prof = self.profile.write().unwrap();
-                    if prof.axes.len() <= i {
-                        prof.axes.resize(6, Default::default());
+                    let layer = prof.layer_mut(self.edit_shift);
+                    if layer.len() <= i {
+                        layer.resize(6, Default::default());
                     }
-                    prof.axes[i].enabled = true;
-                    prof.axes[i].dest = dest;
+                    layer[i].enabled = true;
+                    layer[i].dest = dest;
                     self.status =
                         format!("assigned {} → {}", DOF_NAMES[i], dest.short_label());
                     self.assigning = None;
@@ -472,7 +503,11 @@ impl eframe::App for App {
         egui::Panel::right("gamepad")
             .exact_size(210.0)
             .show(ui, |ui| {
-                gamepad_view(ui, &out, &pressed_set);
+                let shifted_live = {
+                    let prof = self.profile.read().unwrap();
+                    prof.shift_src.is_some_and(|s| state.buttons.contains(&s))
+                };
+                gamepad_view(ui, &out, &pressed_set, shifted_live);
                 ui.separator();
                 ui.label(egui::RichText::new("Quick assign").strong());
                 if let Some((dest, _, _)) = self.assigning {
@@ -579,14 +614,27 @@ impl eframe::App for App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                ui.heading("Axes");
+                ui.horizontal(|ui| {
+                    ui.heading("Axes");
+                    ui.separator();
+                    ui.label("layer:");
+                    ui.selectable_value(&mut self.edit_shift, false, "base");
+                    ui.selectable_value(&mut self.edit_shift, true, "shift");
+                    if self.edit_shift {
+                        ui.label(
+                            egui::RichText::new("active while shift key held")
+                                .weak(),
+                        );
+                    }
+                });
                 // conflict detection: enabled axes sharing a dest
                 let conflicts: Vec<usize> = {
                     let prof = self.profile.read().unwrap();
+                    let layer = prof.layer(self.edit_shift);
                     (0..6)
                         .map(|d| {
                             let ax = OutAxis::ALL[d];
-                            prof.axes
+                            layer
                                 .iter()
                                 .take(6)
                                 .filter(|m| {
@@ -598,10 +646,11 @@ impl eframe::App for App {
                 };
                 for i in 0..6 {
                     let mut prof = self.profile.write().unwrap();
-                    if prof.axes.len() <= i {
-                        prof.axes.resize(6, Default::default());
+                    let layer = prof.layer_mut(self.edit_shift);
+                    if layer.len() <= i {
+                        layer.resize(6, Default::default());
                     }
-                    let map = &mut prof.axes[i];
+                    let map = &mut layer[i];
                     // Fixed-size card: Frame::group fills its parent's max
                     // rect, and a child ui inherits the parent's layout, so
                     // we allocate a bounded rect and force a top-down layout.
@@ -728,7 +777,29 @@ impl eframe::App for App {
                 }
 
                 ui.add_space(8.0);
-                ui.heading("Buttons");
+                ui.horizontal(|ui| {
+                    ui.heading("Buttons");
+                    ui.separator();
+                    ui.label("shift key:");
+                    let capturing = self.capturing_shift.is_some();
+                    let label = if capturing {
+                        "press device button...".to_string()
+                    } else {
+                        {
+                            let prof = self.profile.read().unwrap();
+                            prof.shift_src
+                                .map(|c| format!("0x{c:03X}"))
+                                .unwrap_or_else(|| "(none)".into())
+                        }
+                    };
+                    if ui.button(label).clicked() && !capturing {
+                        self.capturing_shift = Some(state.last_key);
+                    }
+                    if ui.button("x").clicked() {
+                        self.profile.write().unwrap().shift_src = None;
+                        self.capturing_shift = None;
+                    }
+                });
                 {
                     let mut prof = self.profile.write().unwrap();
                     let mut remove = None;
@@ -761,6 +832,29 @@ impl eframe::App for App {
                                 .show_ui(ui, |ui| {
                                     for k in DestKey::ALL {
                                         ui.selectable_value(&mut b.dest, k, k.label());
+                                    }
+                                });
+                            ui.label("shift→");
+                            egui::ComboBox::from_id_salt(("bsh", i))
+                                .width(60.0)
+                                .selected_text(
+                                    b.shift_dest
+                                        .map(|d| d.short_label())
+                                        .unwrap_or("same"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(b.shift_dest.is_none(), "same")
+                                        .clicked()
+                                    {
+                                        b.shift_dest = None;
+                                    }
+                                    for k in DestKey::ALL {
+                                        ui.selectable_value(
+                                            &mut b.shift_dest,
+                                            Some(k),
+                                            k.label(),
+                                        );
                                     }
                                 });
                             if ui.button("x").clicked() {

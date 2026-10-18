@@ -76,11 +76,14 @@ impl Pipeline {
                 };
                 let (out, pressed) = {
                     let prof = profile.read().unwrap();
+                    let shifted =
+                        prof.shift_src.is_some_and(|s| btns_in.contains(&s));
+                    let axes_cfg = prof.layer(shifted);
                     let mut out = [0.0f32; 6];
                     // Triggers (ABS_Z/ABS_RZ) rest at min = released.
                     out[OutAxis::Z.code() as usize] = -1.0;
                     out[OutAxis::Rz.code() as usize] = -1.0;
-                    for (i, m) in prof.axes.iter().enumerate().take(6) {
+                    for (i, m) in axes_cfg.iter().enumerate().take(6) {
                         let v = apply_axis(m, axes_in[i], &mut acc[i], dt);
                         for dest in [Some(m.dest), m.dest2].into_iter().flatten() {
                             let v = if matches!(dest, OutAxis::Z | OutAxis::Rz) {
@@ -99,7 +102,13 @@ impl Pipeline {
                             prof.buttons
                                 .iter()
                                 .find(|b| b.src == *src)
-                                .map(|b| b.dest.code())
+                                .map(|b| {
+                                    if shifted {
+                                        b.shift_dest.unwrap_or(b.dest).code()
+                                    } else {
+                                        b.dest.code()
+                                    }
+                                })
                         })
                         .collect();
                     (out, pressed)

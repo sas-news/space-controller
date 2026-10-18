@@ -216,6 +216,8 @@ pub struct ButtonMap {
     /// Source evdev key code, e.g. BTN_0 = 0x100.
     pub src: u16,
     pub dest: DestKey,
+    /// Optional destination used while the shift button is held.
+    pub shift_dest: Option<DestKey>,
 }
 
 impl Default for ButtonMap {
@@ -223,6 +225,7 @@ impl Default for ButtonMap {
         Self {
             src: 0x100,
             dest: DestKey::South,
+            shift_dest: None,
         }
     }
 }
@@ -233,7 +236,35 @@ pub struct Profile {
     pub name: String,
     /// Per input DOF (index 0..6).
     pub axes: Vec<AxisMap>,
+    /// Alternative axis layer, active while `shift_src` is held.
+    /// None means "same as axes".
+    pub shift_axes: Option<Vec<AxisMap>>,
+    /// Source key code that engages the shift layer while held.
+    pub shift_src: Option<u16>,
     pub buttons: Vec<ButtonMap>,
+}
+
+impl Profile {
+    /// Axis layer to use for the given shift state.
+    pub fn layer(&self, shifted: bool) -> &[AxisMap] {
+        if shifted {
+            self.shift_axes.as_deref().unwrap_or(&self.axes)
+        } else {
+            &self.axes
+        }
+    }
+
+    /// Editable axis layer; cloning `axes` into `shift_axes` on demand.
+    pub fn layer_mut(&mut self, shifted: bool) -> &mut Vec<AxisMap> {
+        if shifted {
+            if self.shift_axes.is_none() {
+                self.shift_axes = Some(self.axes.clone());
+            }
+            self.shift_axes.as_mut().unwrap()
+        } else {
+            &mut self.axes
+        }
+    }
 }
 
 impl Default for Profile {
@@ -250,14 +281,18 @@ impl Default for Profile {
         Self {
             name: "Default".into(),
             axes,
+            shift_axes: None,
+            shift_src: None,
             buttons: vec![
                 ButtonMap {
                     src: 0x100, // BTN_0 (Compact left)
                     dest: DestKey::South,
+                    shift_dest: None,
                 },
                 ButtonMap {
                     src: 0x101, // BTN_1 (Compact right)
                     dest: DestKey::East,
+                    shift_dest: None,
                 },
             ],
         }
