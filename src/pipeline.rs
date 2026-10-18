@@ -7,8 +7,8 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::input;
-use crate::mapping::{apply_axis, InputState, Profile};
-use crate::output::VirtualPad;
+use crate::mapping::{apply_axis, InputState, OutAxis, Profile};
+use crate::output::{PadIdentity, VirtualPad};
 
 #[derive(Clone)]
 pub enum Source {
@@ -29,6 +29,7 @@ pub struct Pipeline {
 impl Pipeline {
     pub fn start(
         source: Source,
+        identity: PadIdentity,
         state: Arc<Mutex<InputState>>,
         profile: Arc<RwLock<Profile>>,
         preview_out: Arc<Mutex<([f32; 6], Vec<u16>)>>,
@@ -37,7 +38,7 @@ impl Pipeline {
 
         // Create the virtual pad before spawning the reader so a uinput
         // failure doesn't leave the source device grabbed.
-        let mut pad = VirtualPad::create()?;
+        let mut pad = VirtualPad::create(identity)?;
         let node_path = pad
             .dev_nodes()
             .ok()
@@ -76,8 +77,18 @@ impl Pipeline {
                 let (out, pressed) = {
                     let prof = profile.read().unwrap();
                     let mut out = [0.0f32; 6];
+                    // Triggers (ABS_Z/ABS_RZ) rest at min = released.
+                    out[OutAxis::Z.code() as usize] = -1.0;
+                    out[OutAxis::Rz.code() as usize] = -1.0;
                     for (i, m) in prof.axes.iter().enumerate().take(6) {
                         let v = apply_axis(m, axes_in[i], &mut acc[i], dt);
+                        let v = if matches!(m.dest, OutAxis::Z | OutAxis::Rz) {
+                            // Trigger semantics: only positive travel pulls,
+                            // centered input means released (-1).
+                            v.max(0.0) * 2.0 - 1.0
+                        } else {
+                            v
+                        };
                         out[m.dest.code() as usize] = v;
                     }
                     let pressed: Vec<u16> = btns_in

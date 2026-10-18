@@ -8,6 +8,7 @@ use crate::input::{self, Discovered};
 use crate::mapping::{
     shape, AxisMode, ButtonMap, DestKey, InputState, OutAxis, Profile, DOF_NAMES,
 };
+use crate::output::PadIdentity;
 use crate::pipeline::{Pipeline, Source};
 use crate::profile;
 
@@ -34,13 +35,18 @@ pub struct App {
     save_name: String,
     devices: Vec<Discovered>,
     device_sel: usize,
+    pad_id: PadIdentity,
+    theme: egui::ThemePreference,
     pipeline: Option<Pipeline>,
     status: String,
     capturing: Option<(usize, Option<u16>)>,
 }
 
 impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Reserve layout space for scrollbars instead of floating over content.
+        cc.egui_ctx
+            .all_styles_mut(|s| s.spacing.scroll.floating = false);
         let profile_names = profile::list_profiles();
         let profile = profile_names
             .first()
@@ -55,6 +61,8 @@ impl App {
             save_name: String::new(),
             devices: input::find_devices(),
             device_sel: 0,
+            pad_id: PadIdentity::Xbox360,
+            theme: egui::ThemePreference::System,
             pipeline: None,
             status: "idle".into(),
             capturing: None,
@@ -76,6 +84,7 @@ impl App {
         };
         match Pipeline::start(
             source,
+            self.pad_id,
             self.state.clone(),
             self.profile.clone(),
             self.out_preview.clone(),
@@ -168,7 +177,11 @@ fn curve_plot(ui: &mut egui::Ui, map: &crate::mapping::AxisMap, raw: f32) {
     // current position marker
     let cy = rect.center().y - shape(map, raw) * (rect.height() / 2.0 - 3.0);
     let cx = rect.left() + (raw.clamp(-1.0, 1.0) + 1.0) / 2.0 * rect.width();
-    painter.circle_filled(egui::pos2(cx, cy), 3.0, egui::Color32::WHITE);
+    painter.circle_filled(
+        egui::pos2(cx, cy),
+        3.0,
+        ui.visuals().strong_text_color(),
+    );
 }
 
 fn stick_dot(
@@ -308,10 +321,27 @@ impl eframe::App for App {
 
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("space-controller");
+                let running = self.pipeline.is_some();
+                let (label, color) = if running {
+                    ("Stop", egui::Color32::from_rgb(150, 40, 40))
+                } else {
+                    ("Start", egui::Color32::from_rgb(40, 120, 60))
+                };
+                let btn = egui::Button::new(
+                    egui::RichText::new(label)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(color);
+                if ui.add(btn).clicked() {
+                    if running {
+                        self.stop();
+                    } else {
+                        self.start();
+                    }
+                }
                 ui.separator();
 
-                let running = self.pipeline.is_some();
                 ui.add_enabled_ui(!running, |ui| {
                     let mut labels: Vec<String> =
                         self.devices.iter().map(|d| d.name.clone()).collect();
@@ -331,17 +361,40 @@ impl eframe::App for App {
                     if ui.button("Refresh").clicked() {
                         self.devices = input::find_devices();
                     }
+                    ui.separator();
+                    ui.label("pad:");
+                    egui::ComboBox::from_id_salt("padid")
+                        .width(120.0)
+                        .selected_text(self.pad_id.label())
+                        .show_ui(ui, |ui| {
+                            for id in PadIdentity::ALL {
+                                ui.selectable_value(&mut self.pad_id, id, id.label());
+                            }
+                        });
                 });
-
-                if running {
-                    if ui.button("Stop").clicked() {
-                        self.stop();
-                    }
-                } else if ui.button("Start").clicked() {
-                    self.start();
-                }
                 ui.separator();
                 ui.label(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("theme")
+                        .width(72.0)
+                        .selected_text(match self.theme {
+                            egui::ThemePreference::Dark => "Dark",
+                            egui::ThemePreference::Light => "Light",
+                            egui::ThemePreference::System => "Auto",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (t, l) in [
+                                (egui::ThemePreference::System, "Auto"),
+                                (egui::ThemePreference::Dark, "Dark"),
+                                (egui::ThemePreference::Light, "Light"),
+                            ] {
+                                ui.selectable_value(&mut self.theme, t, l);
+                            }
+                        });
+                    ui.label("theme:");
+                });
+                ui.ctx()
+                    .options_mut(|o| o.theme_preference = self.theme);
             });
         });
 
@@ -399,7 +452,9 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                 ui.heading("Axes");
                 // conflict detection: enabled axes sharing a dest
                 let conflicts: Vec<usize> = {

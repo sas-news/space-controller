@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use space_controller::mapping::{InputState, Profile};
+use space_controller::output::PadIdentity;
 use space_controller::pipeline::{Pipeline, Source};
 
 #[test]
@@ -12,6 +13,7 @@ fn demo_source_drives_virtual_pad() {
 
     let p = Pipeline::start(
         Source::Demo,
+        PadIdentity::Generic,
         state.clone(),
         profile,
         preview.clone(),
