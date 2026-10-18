@@ -1,18 +1,21 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use eframe::egui;
 
 use crate::input::{self, Discovered};
-use crate::mapping::{AxisMode, ButtonMap, DestKey, InputState, OutAxis, Profile, DOF_NAMES};
+use crate::mapping::{
+    shape, AxisMode, ButtonMap, DestKey, InputState, OutAxis, Profile, DOF_NAMES,
+};
 use crate::pipeline::{Pipeline, Source};
 use crate::profile;
 
 pub fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([820.0, 720.0])
-            .with_min_inner_size([640.0, 480.0]),
+            .with_inner_size([720.0, 660.0])
+            .with_min_inner_size([700.0, 540.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -24,7 +27,7 @@ pub fn run() -> eframe::Result<()> {
 
 pub struct App {
     state: Arc<Mutex<InputState>>,
-    out_preview: Arc<Mutex<[f32; 6]>>,
+    out_preview: Arc<Mutex<([f32; 6], Vec<u16>)>>,
     profile: Arc<RwLock<Profile>>,
     profile_names: Vec<String>,
     profile_sel: Option<String>,
@@ -45,7 +48,7 @@ impl App {
             .unwrap_or_default();
         let mut app = Self {
             state: Arc::new(Mutex::new(InputState::default())),
-            out_preview: Arc::new(Mutex::new([0.0; 6])),
+            out_preview: Arc::new(Mutex::new(([0.0; 6], Vec::new()))),
             profile: Arc::new(RwLock::new(profile)),
             profile_sel: profile_names.first().cloned(),
             profile_names,
@@ -78,8 +81,11 @@ impl App {
             self.out_preview.clone(),
         ) {
             Ok(p) => {
+                self.status = match p.node_path() {
+                    Some(n) => format!("running — output at {n}"),
+                    None => "running".into(),
+                };
                 self.pipeline = Some(p);
-                self.status = "running — virtual gamepad emitted".into();
             }
             Err(e) => {
                 self.status = format!("start failed: {e:#}");
@@ -111,7 +117,11 @@ fn axis_bar(ui: &mut egui::Ui, value: f32, width: f32) {
         rect.top() + 2.0..=rect.bottom() - 2.0,
     );
     painter.rect_filled(bar, 2.0, accent);
-    painter.vline(mid, rect.y_range(), egui::Stroke::new(1.0, ui.visuals().weak_text_color()));
+    painter.vline(
+        mid,
+        rect.y_range(),
+        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+    );
     painter.text(
         rect.right_center() - egui::vec2(4.0, 0.0),
         egui::Align2::RIGHT_CENTER,
@@ -119,6 +129,177 @@ fn axis_bar(ui: &mut egui::Ui, value: f32, width: f32) {
         egui::FontId::monospace(10.0),
         ui.visuals().text_color(),
     );
+}
+
+/// Small response-curve preview: y = shape(map, x) over -1..1.
+fn curve_plot(ui: &mut egui::Ui, map: &crate::mapping::AxisMap, raw: f32) {
+    let size = egui::vec2(96.0, 48.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    let bg = ui.visuals().extreme_bg_color;
+    let accent = ui.visuals().selection.bg_fill;
+    let weak = ui.visuals().weak_text_color();
+    painter.rect_filled(rect, 3.0, bg);
+    painter.hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, weak),
+    );
+    painter.vline(
+        rect.center().x,
+        rect.y_range(),
+        egui::Stroke::new(1.0, weak),
+    );
+    let n = 48;
+    let points: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let x = i as f32 / n as f32 * 2.0 - 1.0;
+            let y = shape(map, x);
+            egui::pos2(
+                rect.left() + (x + 1.0) / 2.0 * rect.width(),
+                rect.center().y - y * (rect.height() / 2.0 - 3.0),
+            )
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.5, accent),
+    ));
+    // current position marker
+    let cy = rect.center().y - shape(map, raw) * (rect.height() / 2.0 - 3.0);
+    let cx = rect.left() + (raw.clamp(-1.0, 1.0) + 1.0) / 2.0 * rect.width();
+    painter.circle_filled(egui::pos2(cx, cy), 3.0, egui::Color32::WHITE);
+}
+
+fn stick_dot(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    r: f32,
+    x: f32,
+    y: f32,
+    weak: egui::Color32,
+    accent: egui::Color32,
+) {
+    painter.circle_stroke(center, r, egui::Stroke::new(1.5, weak));
+    painter.line_segment(
+        [center - egui::vec2(r, 0.0), center + egui::vec2(r, 0.0)],
+        egui::Stroke::new(1.0, weak),
+    );
+    painter.line_segment(
+        [center - egui::vec2(0.0, r), center + egui::vec2(0.0, r)],
+        egui::Stroke::new(1.0, weak),
+    );
+    painter.circle_filled(center + egui::vec2(x, -y) * (r - 6.0), 5.0, accent);
+}
+
+fn trigger_bar(ui: &mut egui::Ui, v: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 52.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    // triggers: -1 = released, +1 = full pull. Fill from bottom.
+    let t = (v.clamp(-1.0, 1.0) + 1.0) / 2.0;
+    let fill_h = rect.height() * t;
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - fill_h),
+            rect.right_bottom(),
+        ),
+        3.0,
+        ui.visuals().selection.bg_fill,
+    );
+}
+
+fn gamepad_view(ui: &mut egui::Ui, out: &[f32; 6], pressed: &HashSet<u16>) {
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("Virtual gamepad").strong());
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label("LT");
+                trigger_bar(ui, out[OutAxis::Z.code() as usize]);
+            });
+            ui.vertical(|ui| {
+                ui.label("LS");
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(52.0, 52.0), egui::Sense::hover());
+                stick_dot(
+                    ui.painter(),
+                    rect.center(),
+                    26.0,
+                    out[OutAxis::X.code() as usize],
+                    out[OutAxis::Y.code() as usize],
+                    ui.visuals().weak_text_color(),
+                    ui.visuals().selection.bg_fill,
+                );
+            });
+            ui.vertical(|ui| {
+                ui.label("RS");
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(52.0, 52.0), egui::Sense::hover());
+                stick_dot(
+                    ui.painter(),
+                    rect.center(),
+                    26.0,
+                    out[OutAxis::Rx.code() as usize],
+                    out[OutAxis::Ry.code() as usize],
+                    ui.visuals().weak_text_color(),
+                    ui.visuals().selection.bg_fill,
+                );
+            });
+            ui.vertical(|ui| {
+                ui.label("RT");
+                trigger_bar(ui, out[OutAxis::Rz.code() as usize]);
+            });
+        });
+        ui.separator();
+        ui.label("buttons");
+        let row1 = [
+            DestKey::South,
+            DestKey::East,
+            DestKey::West,
+            DestKey::North,
+        ];
+        let row2 = [
+            DestKey::TL,
+            DestKey::TR,
+            DestKey::TL2,
+            DestKey::TR2,
+            DestKey::Select,
+            DestKey::Start,
+            DestKey::ThumbL,
+            DestKey::ThumbR,
+        ];
+        for row in [&row1[..], &row2[..]] {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for k in row {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                    let on = pressed.contains(&k.code());
+                    ui.painter().circle(
+                        rect.center(),
+                        7.0,
+                        if on {
+                            ui.visuals().selection.bg_fill
+                        } else {
+                            ui.visuals().extreme_bg_color
+                        },
+                        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+                    );
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        k.short_label(),
+                        egui::FontId::proportional(7.5),
+                        if on {
+                            egui::Color32::BLACK
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    );
+                }
+            });
+        }
+    });
 }
 
 impl eframe::App for App {
@@ -132,11 +313,8 @@ impl eframe::App for App {
 
                 let running = self.pipeline.is_some();
                 ui.add_enabled_ui(!running, |ui| {
-                    let mut labels: Vec<String> = self
-                        .devices
-                        .iter()
-                        .map(|d| d.name.clone())
-                        .collect();
+                    let mut labels: Vec<String> =
+                        self.devices.iter().map(|d| d.name.clone()).collect();
                     labels.push("Demo (synthetic input)".into());
                     egui::ComboBox::from_id_salt("source")
                         .selected_text(
@@ -167,11 +345,25 @@ impl eframe::App for App {
             });
         });
 
+        let state = self.state.lock().unwrap().clone();
+        let (out, out_pressed) = self.out_preview.lock().unwrap().clone();
+        let pressed_set: HashSet<u16> = out_pressed.into_iter().collect();
+
+        egui::Panel::right("gamepad")
+            .exact_size(210.0)
+            .show(ui, |ui| {
+                gamepad_view(ui, &out, &pressed_set);
+                ui.separator();
+                ui.label(format!("src keys: {:?}", state.buttons));
+            });
+
         egui::Panel::bottom("profiles").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Profile:");
                 egui::ComboBox::from_id_salt("profile")
-                    .selected_text(self.profile_sel.clone().unwrap_or_else(|| "(unsaved)".into()))
+                    .selected_text(
+                        self.profile_sel.clone().unwrap_or_else(|| "(unsaved)".into()),
+                    )
                     .show_ui(ui, |ui| {
                         for n in &self.profile_names {
                             ui.selectable_value(&mut self.profile_sel, Some(n.clone()), n);
@@ -207,32 +399,59 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            let state = self.state.lock().unwrap().clone();
-            let out = *self.out_preview.lock().unwrap();
-
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Axes");
+                // conflict detection: enabled axes sharing a dest
+                let conflicts: Vec<usize> = {
+                    let prof = self.profile.read().unwrap();
+                    (0..6)
+                        .map(|d| {
+                            prof.axes
+                                .iter()
+                                .take(6)
+                                .filter(|m| m.enabled && m.dest == OutAxis::ALL[d])
+                                .count()
+                        })
+                        .collect()
+                };
                 for i in 0..6 {
                     let mut prof = self.profile.write().unwrap();
                     if prof.axes.len() <= i {
                         prof.axes.resize(6, Default::default());
                     }
                     let map = &mut prof.axes[i];
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                    // Fixed-size card: Frame::group fills its parent's max
+                    // rect, and a child ui inherits the parent's layout, so
+                    // we allocate a bounded rect and force a top-down layout.
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(440.0, 148.0),
+                        egui::Sense::hover(),
+                    );
+                    let mut card = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    card.spacing_mut().slider_width = 110.0;
+                    egui::Frame::group(card.style()).show(&mut card, |ui| {
                         ui.horizontal(|ui| {
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(format!("{i}  {}", DOF_NAMES[i])).strong(),
-                            ));
+                            ui.label(egui::RichText::new(DOF_NAMES[i]).strong());
                             ui.label("in");
-                            axis_bar(ui, state.axes[i], 140.0);
-                            ui.label("out");
-                            let out_idx = if map.enabled {
-                                map.dest.code() as usize
+                            axis_bar(ui, state.axes[i], 70.0);
+                            ui.label("→");
+                            let ov = if map.enabled {
+                                out[map.dest.code() as usize]
                             } else {
-                                99
+                                0.0
                             };
-                            let ov = if out_idx < 6 { out[out_idx] } else { 0.0 };
-                            axis_bar(ui, ov, 140.0);
+                            axis_bar(ui, ov, 70.0);
+                            ui.label("out");
+                            if map.enabled && conflicts[map.dest.code() as usize] > 1 {
+                                ui.label(
+                                    egui::RichText::new("⚠ dest shared")
+                                        .color(egui::Color32::YELLOW),
+                                );
+                            }
                         });
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut map.enabled, "on");
@@ -262,16 +481,37 @@ impl eframe::App for App {
                                 });
                         });
                         ui.horizontal(|ui| {
-                            ui.label("deadzone");
-                            ui.add(egui::Slider::new(&mut map.deadzone, 0.0..=0.9));
-                            ui.label("expo");
-                            ui.add(egui::Slider::new(&mut map.expo, 0.0..=0.95));
-                            ui.label("gain");
-                            ui.add(egui::Slider::new(&mut map.gain, 0.0..=4.0));
-                            if map.mode == AxisMode::Integral {
-                                ui.label("rate/s");
-                                ui.add(egui::Slider::new(&mut map.rate, 0.1..=5.0));
-                            }
+                            curve_plot(ui, map, state.axes[i]);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("deadzone");
+                                    ui.add(
+                                        egui::Slider::new(&mut map.deadzone, 0.0..=0.9)
+                                            .fixed_decimals(2),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("expo");
+                                    ui.add(
+                                        egui::Slider::new(&mut map.expo, 0.0..=0.95)
+                                            .fixed_decimals(2),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("gain");
+                                    ui.add(
+                                        egui::Slider::new(&mut map.gain, 0.0..=4.0)
+                                            .fixed_decimals(2),
+                                    );
+                                    if map.mode == AxisMode::Integral {
+                                        ui.label("rate/s");
+                                        ui.add(
+                                            egui::Slider::new(&mut map.rate, 0.1..=5.0)
+                                                .fixed_decimals(2),
+                                        );
+                                    }
+                                });
+                            });
                         });
                     });
                 }
@@ -324,9 +564,6 @@ impl eframe::App for App {
                         prof.buttons.push(ButtonMap::default());
                     }
                 }
-
-                ui.add_space(8.0);
-                ui.label(format!("pressed src keys: {:?}", state.buttons));
             });
         });
     }

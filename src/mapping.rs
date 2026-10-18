@@ -141,6 +141,24 @@ impl DestKey {
         DestKey::ThumbR,
     ];
 
+    /// Short label for compact indicators.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            DestKey::South => "A",
+            DestKey::East => "B",
+            DestKey::North => "Y",
+            DestKey::West => "X",
+            DestKey::TL => "L1",
+            DestKey::TR => "R1",
+            DestKey::TL2 => "L2",
+            DestKey::TR2 => "R2",
+            DestKey::Select => "Sl",
+            DestKey::Start => "St",
+            DestKey::ThumbL => "L3",
+            DestKey::ThumbR => "R3",
+        }
+    }
+
     /// evdev key code.
     pub fn code(self) -> u16 {
         match self {
@@ -205,21 +223,15 @@ pub struct Profile {
 
 impl Default for Profile {
     fn default() -> Self {
-        let mut axes = vec![AxisMap::default(); 6];
-        // Sensible flight-oriented defaults:
-        //   tilt fwd/back (pitch) -> LY, tilt L/R (roll) -> LX,
-        //   twist (yaw) -> RX, push up/down (collective) -> RT integral,
-        //   push fwd/back -> RY, push L/R -> unused-but-left-as-X disabled
-        axes[0].enabled = false; // Push L/R off by default
-        axes[1].dest = OutAxis::Ry; // Push Fwd/Back -> RY
-        axes[2].dest = OutAxis::Rz; // Push Up/Down -> RT, integral
-        axes[2].mode = AxisMode::Integral;
-        axes[2].rate = 1.2;
-        axes[2].expo = 0.0;
-        axes[3].dest = OutAxis::Y; // Tilt Fwd/Back -> LY (pitch)
-        axes[3].invert = true;
-        axes[4].dest = OutAxis::X; // Tilt L/R -> LX (roll)
-        axes[5].dest = OutAxis::Rx; // Twist -> RX (yaw)
+        // Default is a plain 1:1 pass-through: every DOF enabled, Direct
+        // mode, identity mapping to the same-numbered output axis.
+        let axes = (0..6)
+            .map(|i| AxisMap {
+                dest: OutAxis::ALL[i],
+                expo: 0.0,
+                ..AxisMap::default()
+            })
+            .collect();
         Self {
             name: "Default".into(),
             axes,
@@ -253,9 +265,9 @@ pub struct InputState {
     pub rel_stamp: [Option<std::time::Instant>; 6],
 }
 
-/// Apply one axis mapping. `acc` is the integrator accumulator for
-/// Integral-mode axes; `dt` is the tick length in seconds.
-pub fn apply_axis(map: &AxisMap, raw: f32, acc: &mut f32, dt: f32) -> f32 {
+/// Apply deadzone/expo/gain/invert to a normalized input value.
+/// Used both by the realtime path and by the UI's response-curve preview.
+pub fn shape(map: &AxisMap, raw: f32) -> f32 {
     if !map.enabled {
         return 0.0;
     }
@@ -275,8 +287,13 @@ pub fn apply_axis(map: &AxisMap, raw: f32, acc: &mut f32, dt: f32) -> f32 {
     if map.invert {
         x = -x;
     }
-    x = x.clamp(-1.0, 1.0);
+    x.clamp(-1.0, 1.0)
+}
 
+/// Apply one axis mapping. `acc` is the integrator accumulator for
+/// Integral-mode axes; `dt` is the tick length in seconds.
+pub fn apply_axis(map: &AxisMap, raw: f32, acc: &mut f32, dt: f32) -> f32 {
+    let x = shape(map, raw);
     match map.mode {
         AxisMode::Direct => x,
         AxisMode::Integral => {

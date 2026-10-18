@@ -23,6 +23,7 @@ const REL_DECAY: Duration = Duration::from_millis(120);
 pub struct Pipeline {
     stop: Arc<AtomicBool>,
     handles: Vec<JoinHandle<()>>,
+    node_path: Option<String>,
 }
 
 impl Pipeline {
@@ -30,14 +31,20 @@ impl Pipeline {
         source: Source,
         state: Arc<Mutex<InputState>>,
         profile: Arc<RwLock<Profile>>,
-        preview_out: Arc<Mutex<[f32; 6]>>,
+        preview_out: Arc<Mutex<([f32; 6], Vec<u16>)>>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
 
         // Create the virtual pad before spawning the reader so a uinput
         // failure doesn't leave the source device grabbed.
         let mut pad = VirtualPad::create()?;
-        eprintln!("[space-controller] virtual pad created");
+        let node_path = pad
+            .dev_nodes()
+            .ok()
+            .and_then(|mut it| it.next())
+            .and_then(|r| r.ok())
+            .map(|p| p.display().to_string());
+        eprintln!("[space-controller] virtual pad created at {node_path:?}");
 
         let reader = match &source {
             Source::Device(d) => input::spawn_reader(d.clone(), state.clone(), stop.clone()),
@@ -90,7 +97,7 @@ impl Pipeline {
                         emit_err_logged = true;
                     }
                 }
-                *preview_out.lock().unwrap() = out;
+                *preview_out.lock().unwrap() = (out, pressed);
                 std::thread::sleep(tick);
             }
         });
@@ -98,7 +105,13 @@ impl Pipeline {
         Ok(Self {
             stop,
             handles: vec![reader, out_thread],
+            node_path,
         })
+    }
+
+    /// Path of the virtual pad's event node, if resolvable.
+    pub fn node_path(&self) -> Option<&str> {
+        self.node_path.as_deref()
     }
 
     pub fn stop(self) {

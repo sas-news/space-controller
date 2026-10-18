@@ -7,7 +7,7 @@ use space_controller::pipeline::{Pipeline, Source};
 #[test]
 fn demo_source_drives_virtual_pad() {
     let state = Arc::new(Mutex::new(InputState::default()));
-    let preview = Arc::new(Mutex::new([0.0f32; 6]));
+    let preview = Arc::new(Mutex::new(([0.0f32; 6], Vec::new())));
     let profile = Arc::new(RwLock::new(Profile::default()));
 
     let p = Pipeline::start(
@@ -19,7 +19,7 @@ fn demo_source_drives_virtual_pad() {
     .expect("pipeline start");
 
     std::thread::sleep(Duration::from_millis(300));
-    let out = *preview.lock().unwrap();
+    let (out, _pressed) = preview.lock().unwrap().clone();
     p.stop();
 
     // The demo source is always moving on several axes; at least one

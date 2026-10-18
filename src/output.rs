@@ -31,6 +31,13 @@ impl VirtualPad {
         Ok(Self { dev })
     }
 
+    /// Dev nodes (e.g. /dev/input/eventN) of the virtual device.
+    pub fn dev_nodes(
+        &mut self,
+    ) -> Result<impl Iterator<Item = std::io::Result<std::path::PathBuf>> + '_> {
+        Ok(self.dev.enumerate_dev_nodes_blocking()?)
+    }
+
     /// Emit a full state snapshot. `axes` are -1.0..=1.0 indexed by
     /// OutAxis order; `pressed` are source->dest resolved key codes.
     pub fn emit(&mut self, axes: &[f32; 6], pressed: &[u16]) -> Result<()> {
