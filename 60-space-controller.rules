@@ -1,0 +1,20 @@
+# space-controller udev rules — install to /etc/udev/rules.d/ then:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# 3Dconnexion space mice (covers both vendor 0x256f and old Logitech-era
+# devices at 0x046d by matching the device name): grant the seat user read
+# access, and make sure games do NOT see the raw device as a joystick —
+# the virtual pad is the joystick; the source is grabbed exclusively.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="3Dconnexion*", \
+    TAG+="uaccess", ENV{ID_INPUT_JOYSTICK}=""
+
+# hidraw nodes for the same devices: used as the input backend because some
+# hid drivers (e.g. hid-logitech on old SpaceNavigator variants) drop the
+# axis reports before they reach evdev.
+ACTION=="add|change", SUBSYSTEM=="hidraw", KERNELS=="0003:046D:*", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="hidraw", KERNELS=="0003:256F:*", TAG+="uaccess"
+
+# The virtual gamepad this app creates: tag it as a joystick so SDL2 /
+# browsers / Wine pick it up, and keep it accessible to the seat user.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Space Controller Gamepad", \
+    TAG+="uaccess", ENV{ID_INPUT_JOYSTICK}="1"

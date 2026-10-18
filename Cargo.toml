@@ -1,0 +1,14 @@
+[package]
+name = "space-controller"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+directories = "6.0.0"
+eframe = "0.37.0"
+egui_extras = "0.37.0"
+evdev = "0.13.2"
+libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
