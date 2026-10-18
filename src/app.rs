@@ -40,6 +40,34 @@ pub struct App {
     pipeline: Option<Pipeline>,
     status: String,
     capturing: Option<(usize, Option<u16>)>,
+    /// Quick-assign state: target output axis + input baseline snapshot.
+    assigning: Option<(OutAxis, [f32; 6], std::time::Instant)>,
+    /// Result of asking the freedesktop appearance portal for color-scheme.
+    /// None = couldn't detect; Some(true) = dark; Some(false) = light/none.
+    system_dark: Option<bool>,
+}
+
+/// Ask xdg-desktop-portal for the desktop color scheme.
+/// 1 = prefer-dark, 2 = prefer-light, 0/other = no preference.
+fn detect_system_dark() -> Option<bool> {
+    let out = std::process::Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply=literal",
+            "--dest=org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings.Read",
+            "string:org.freedesktop.appearance",
+            "string:color-scheme",
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let n = s
+        .split_whitespace()
+        .filter_map(|t| t.parse::<u32>().ok())
+        .next_back()?;
+    Some(n == 1)
 }
 
 impl App {
@@ -66,6 +94,8 @@ impl App {
             pipeline: None,
             status: "idle".into(),
             capturing: None,
+            assigning: None,
+            system_dark: detect_system_dark(),
         };
         if app.devices.is_empty() {
             app.status = "no 3Dconnexion device found — use Demo source".into();
@@ -373,28 +403,7 @@ impl eframe::App for App {
                         });
                 });
                 ui.separator();
-                ui.label(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::ComboBox::from_id_salt("theme")
-                        .width(72.0)
-                        .selected_text(match self.theme {
-                            egui::ThemePreference::Dark => "Dark",
-                            egui::ThemePreference::Light => "Light",
-                            egui::ThemePreference::System => "Auto",
-                        })
-                        .show_ui(ui, |ui| {
-                            for (t, l) in [
-                                (egui::ThemePreference::System, "Auto"),
-                                (egui::ThemePreference::Dark, "Dark"),
-                                (egui::ThemePreference::Light, "Light"),
-                            ] {
-                                ui.selectable_value(&mut self.theme, t, l);
-                            }
-                        });
-                    ui.label("theme:");
-                });
-                ui.ctx()
-                    .options_mut(|o| o.theme_preference = self.theme);
+                ui.add(egui::Label::new(&self.status).truncate());
             });
         });
 
@@ -402,10 +411,76 @@ impl eframe::App for App {
         let (out, out_pressed) = self.out_preview.lock().unwrap().clone();
         let pressed_set: HashSet<u16> = out_pressed.into_iter().collect();
 
+        // Quick-assign: after arming an output axis, the first input DOF that
+        // moves past the threshold gets bound to it.
+        if let Some((dest, base, since)) = self.assigning {
+            if since.elapsed() > Duration::from_secs(15) {
+                self.assigning = None;
+                self.status = "assign timed out".into();
+            } else {
+                let mut best = None;
+                let mut best_d = 0.35f32;
+                let mut live = (0usize, 0f32);
+                for i in 0..6 {
+                    let d = (state.axes[i] - base[i]).abs();
+                    if d > live.1 {
+                        live = (i, d);
+                    }
+                    if d > best_d {
+                        best_d = d;
+                        best = Some(i);
+                    }
+                }
+                if let Some(i) = best {
+                    let mut prof = self.profile.write().unwrap();
+                    if prof.axes.len() <= i {
+                        prof.axes.resize(6, Default::default());
+                    }
+                    prof.axes[i].enabled = true;
+                    prof.axes[i].dest = dest;
+                    self.status =
+                        format!("assigned {} → {}", DOF_NAMES[i], dest.short_label());
+                    self.assigning = None;
+                } else {
+                    self.status = format!(
+                        "move cap for {}… ({} @ {:.2})",
+                        dest.short_label(),
+                        DOF_NAMES[live.0],
+                        live.1
+                    );
+                }
+            }
+        }
+
         egui::Panel::right("gamepad")
             .exact_size(210.0)
             .show(ui, |ui| {
                 gamepad_view(ui, &out, &pressed_set);
+                ui.separator();
+                ui.label(egui::RichText::new("Quick assign").strong());
+                if let Some((dest, _, _)) = self.assigning {
+                    ui.label(format!("move cap for {}", dest.short_label()));
+                    if ui.button("Cancel").clicked() {
+                        self.assigning = None;
+                        self.status = "assign cancelled".into();
+                    }
+                } else {
+                    if self.pipeline.is_none() {
+                        ui.label("Start first, then click\nan output axis");
+                    } else {
+                        ui.label("click output axis,\nthen move the cap");
+                    }
+                    ui.add_enabled_ui(self.pipeline.is_some(), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for ax in OutAxis::ALL {
+                                if ui.button(ax.short_label()).clicked() {
+                                    self.assigning =
+                                        Some((ax, state.axes, std::time::Instant::now()));
+                                }
+                            }
+                        });
+                    });
+                }
                 ui.separator();
                 ui.label(format!("src keys: {:?}", state.buttons));
             });
@@ -433,6 +508,38 @@ impl eframe::App for App {
                         }
                     }
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("theme")
+                        .width(72.0)
+                        .selected_text(match self.theme {
+                            egui::ThemePreference::Dark => "Dark",
+                            egui::ThemePreference::Light => "Light",
+                            egui::ThemePreference::System => "Auto",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (t, l) in [
+                                (egui::ThemePreference::System, "Auto"),
+                                (egui::ThemePreference::Dark, "Dark"),
+                                (egui::ThemePreference::Light, "Light"),
+                            ] {
+                                ui.selectable_value(&mut self.theme, t, l);
+                            }
+                        });
+                    ui.label("theme:");
+                });
+                ui.ctx().options_mut(|o| {
+                    o.theme_preference = match self.theme {
+                        egui::ThemePreference::System => match self.system_dark {
+                            // winit can't see the portal color-scheme on
+                            // Wayland, so resolve "no preference" to Light
+                            // (GNOME's visual default).
+                            Some(true) => egui::ThemePreference::Dark,
+                            Some(false) => egui::ThemePreference::Light,
+                            None => egui::ThemePreference::Dark,
+                        },
+                        t => t,
+                    };
+                });
                 ui.separator();
                 ui.label("Save as:");
                 ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(140.0));

@@ -45,6 +45,18 @@ impl OutAxis {
         }
     }
 
+    /// Short label like "LX" for compact UI.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            OutAxis::X => "LX",
+            OutAxis::Y => "LY",
+            OutAxis::Z => "LT",
+            OutAxis::Rx => "RX",
+            OutAxis::Ry => "RY",
+            OutAxis::Rz => "RT",
+        }
+    }
+
     /// evdev ABS_* code.
     pub fn code(self) -> u16 {
         match self {
