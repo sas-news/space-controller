@@ -82,14 +82,16 @@ impl Pipeline {
                     out[OutAxis::Rz.code() as usize] = -1.0;
                     for (i, m) in prof.axes.iter().enumerate().take(6) {
                         let v = apply_axis(m, axes_in[i], &mut acc[i], dt);
-                        let v = if matches!(m.dest, OutAxis::Z | OutAxis::Rz) {
-                            // Trigger semantics: only positive travel pulls,
-                            // centered input means released (-1).
-                            v.max(0.0) * 2.0 - 1.0
-                        } else {
-                            v
-                        };
-                        out[m.dest.code() as usize] = v;
+                        for dest in [Some(m.dest), m.dest2].into_iter().flatten() {
+                            let v = if matches!(dest, OutAxis::Z | OutAxis::Rz) {
+                                // Trigger semantics: only positive travel
+                                // pulls, centered input means released (-1).
+                                v.max(0.0) * 2.0 - 1.0
+                            } else {
+                                v
+                            };
+                            out[dest.code() as usize] = v;
+                        }
                     }
                     let pressed: Vec<u16> = btns_in
                         .iter()

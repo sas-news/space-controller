@@ -93,6 +93,8 @@ impl AxisMode {
 pub struct AxisMap {
     pub enabled: bool,
     pub dest: OutAxis,
+    /// Optional second output axis that mirrors `dest` (1 input -> 2 outputs).
+    pub dest2: Option<OutAxis>,
     pub invert: bool,
     /// 0.0..0.9
     pub deadzone: f32,
@@ -110,6 +112,7 @@ impl Default for AxisMap {
         Self {
             enabled: true,
             dest: OutAxis::X,
+            dest2: None,
             invert: false,
             deadzone: 0.05,
             expo: 0.2,

@@ -141,12 +141,21 @@ impl App {
     }
 }
 
+/// Accent color with enough contrast in both themes (egui's light-theme
+/// selection color is too pale for bar fills).
+fn accent(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        ui.visuals().selection.bg_fill
+    } else {
+        egui::Color32::from_rgb(37, 99, 235)
+    }
+}
+
 fn axis_bar(ui: &mut egui::Ui, value: f32, width: f32) {
     let height = 12.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let painter = ui.painter();
     let bg = ui.visuals().extreme_bg_color;
-    let accent = ui.visuals().selection.bg_fill;
     painter.rect_filled(rect, 3.0, bg);
     let mid = rect.center().x;
     let half = rect.width() / 2.0 - 2.0;
@@ -155,19 +164,28 @@ fn axis_bar(ui: &mut egui::Ui, value: f32, width: f32) {
         mid.min(end)..=mid.max(end),
         rect.top() + 2.0..=rect.bottom() - 2.0,
     );
-    painter.rect_filled(bar, 2.0, accent);
+    painter.rect_filled(bar, 2.0, accent(ui));
     painter.vline(
         mid,
         rect.y_range(),
         egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
     );
-    painter.text(
-        rect.right_center() - egui::vec2(4.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
+    // Value chip with its own background so the bar fill can't wash it out.
+    let galley = painter.layout_no_wrap(
         format!("{:+.2}", value),
         egui::FontId::monospace(10.0),
         ui.visuals().text_color(),
     );
+    let text_pos = egui::pos2(
+        rect.right() - galley.size().x - 3.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    let chip = egui::Rect::from_min_size(
+        text_pos - egui::vec2(2.0, 1.0),
+        galley.size() + egui::vec2(4.0, 2.0),
+    );
+    painter.rect_filled(chip, 2.0, bg);
+    painter.galley(text_pos, galley, ui.visuals().text_color());
 }
 
 /// Small response-curve preview: y = shape(map, x) over -1..1.
@@ -176,7 +194,6 @@ fn curve_plot(ui: &mut egui::Ui, map: &crate::mapping::AxisMap, raw: f32) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
     let bg = ui.visuals().extreme_bg_color;
-    let accent = ui.visuals().selection.bg_fill;
     let weak = ui.visuals().weak_text_color();
     painter.rect_filled(rect, 3.0, bg);
     painter.hline(
@@ -202,7 +219,7 @@ fn curve_plot(ui: &mut egui::Ui, map: &crate::mapping::AxisMap, raw: f32) {
         .collect();
     painter.add(egui::Shape::line(
         points,
-        egui::Stroke::new(1.5, accent),
+        egui::Stroke::new(1.5, accent(ui)),
     ));
     // current position marker
     let cy = rect.center().y - shape(map, raw) * (rect.height() / 2.0 - 3.0);
@@ -248,7 +265,7 @@ fn trigger_bar(ui: &mut egui::Ui, v: f32) {
             rect.right_bottom(),
         ),
         3.0,
-        ui.visuals().selection.bg_fill,
+        accent(ui),
     );
 }
 
@@ -271,7 +288,7 @@ fn gamepad_view(ui: &mut egui::Ui, out: &[f32; 6], pressed: &HashSet<u16>) {
                     out[OutAxis::X.code() as usize],
                     out[OutAxis::Y.code() as usize],
                     ui.visuals().weak_text_color(),
-                    ui.visuals().selection.bg_fill,
+                    accent(ui),
                 );
             });
             ui.vertical(|ui| {
@@ -285,7 +302,7 @@ fn gamepad_view(ui: &mut egui::Ui, out: &[f32; 6], pressed: &HashSet<u16>) {
                     out[OutAxis::Rx.code() as usize],
                     out[OutAxis::Ry.code() as usize],
                     ui.visuals().weak_text_color(),
-                    ui.visuals().selection.bg_fill,
+                    accent(ui),
                 );
             });
             ui.vertical(|ui| {
@@ -322,7 +339,7 @@ fn gamepad_view(ui: &mut egui::Ui, out: &[f32; 6], pressed: &HashSet<u16>) {
                         rect.center(),
                         7.0,
                         if on {
-                            ui.visuals().selection.bg_fill
+                            accent(ui)
                         } else {
                             ui.visuals().extreme_bg_color
                         },
@@ -334,7 +351,7 @@ fn gamepad_view(ui: &mut egui::Ui, out: &[f32; 6], pressed: &HashSet<u16>) {
                         k.short_label(),
                         egui::FontId::proportional(7.5),
                         if on {
-                            egui::Color32::BLACK
+                            egui::Color32::WHITE
                         } else {
                             ui.visuals().text_color()
                         },
@@ -568,10 +585,13 @@ impl eframe::App for App {
                     let prof = self.profile.read().unwrap();
                     (0..6)
                         .map(|d| {
+                            let ax = OutAxis::ALL[d];
                             prof.axes
                                 .iter()
                                 .take(6)
-                                .filter(|m| m.enabled && m.dest == OutAxis::ALL[d])
+                                .filter(|m| {
+                                    m.enabled && (m.dest == ax || m.dest2 == Some(ax))
+                                })
                                 .count()
                         })
                         .collect()
@@ -608,7 +628,12 @@ impl eframe::App for App {
                             };
                             axis_bar(ui, ov, 70.0);
                             ui.label("out");
-                            if map.enabled && conflicts[map.dest.code() as usize] > 1 {
+                            let shared = map.enabled
+                                && (conflicts[map.dest.code() as usize] > 1
+                                    || map.dest2.is_some_and(|d2| {
+                                        conflicts[d2.code() as usize] > 1
+                                    }));
+                            if shared {
                                 ui.label(
                                     egui::RichText::new("⚠ dest shared")
                                         .color(egui::Color32::YELLOW),
@@ -617,12 +642,36 @@ impl eframe::App for App {
                         });
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut map.enabled, "on");
-                            ui.label("to:");
+                            ui.label("→");
                             egui::ComboBox::from_id_salt(("dest", i))
-                                .selected_text(map.dest.label())
+                                .width(52.0)
+                                .selected_text(map.dest.short_label())
                                 .show_ui(ui, |ui| {
                                     for ax in OutAxis::ALL {
                                         ui.selectable_value(&mut map.dest, ax, ax.label());
+                                    }
+                                });
+                            ui.label("+");
+                            egui::ComboBox::from_id_salt(("dest2", i))
+                                .width(52.0)
+                                .selected_text(
+                                    map.dest2
+                                        .map(|d| d.short_label())
+                                        .unwrap_or("none"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(map.dest2.is_none(), "none")
+                                        .clicked()
+                                    {
+                                        map.dest2 = None;
+                                    }
+                                    for ax in OutAxis::ALL {
+                                        ui.selectable_value(
+                                            &mut map.dest2,
+                                            Some(ax),
+                                            ax.label(),
+                                        );
                                     }
                                 });
                             ui.checkbox(&mut map.invert, "invert");
